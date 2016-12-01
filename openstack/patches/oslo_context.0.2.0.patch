@@ -1,0 +1,56 @@
+diff -uNr -x '*.pyc' original/oslo.context-0.2.0/oslo_context/context.py oslo_context/context.py
+--- original/oslo.context-0.2.0/oslo_context/context.py	2015-03-05 14:51:31.000000000 -0500
++++ oslo_context/context.py	2016-04-10 19:32:24.101746382 -0400
+@@ -45,7 +45,7 @@
+     def __init__(self, auth_token=None, user=None, tenant=None, domain=None,
+                  user_domain=None, project_domain=None, is_admin=False,
+                  read_only=False, show_deleted=False, request_id=None,
+-                 resource_uuid=None, overwrite=True):
++                 resource_uuid=None, overwrite=True, label=None):
+         """Initialize the RequestContext
+ 
+         :param overwrite: Set to False to ensure that the greenthread local
+@@ -67,6 +67,12 @@
+         if overwrite or not get_current():
+             self.update_store()
+ 
++        # SYQ
++        if label is not None:
++            self.label = label
++        else:
++            self.label = '|'
++
+     def update_store(self):
+         _request_store.context = self
+ 
+@@ -89,7 +95,8 @@
+                 'auth_token': self.auth_token,
+                 'request_id': self.request_id,
+                 'resource_uuid': self.resource_uuid,
+-                'user_identity': user_idt}
++                'user_identity': user_idt,
++                'label' : self.label}
+ 
+     @classmethod
+     def from_dict(cls, ctx):
+@@ -104,16 +111,17 @@
+             read_only=ctx.get("read_only", False),
+             show_deleted=ctx.get("show_deleted", False),
+             request_id=ctx.get("request_id"),
+-            resource_uuid=ctx.get("resource_uuid"))
++            resource_uuid=ctx.get("resource_uuid"),
++            label=ctx.get("label"))
+ 
+ 
+ def get_admin_context(show_deleted=False):
+-    """Create an administrator context."""
+     context = RequestContext(None,
+                              tenant=None,
+                              is_admin=True,
+                              show_deleted=show_deleted,
+-                             overwrite=False)
++                             overwrite=False,
++                             label=None)
+     return context
+ 
+ 

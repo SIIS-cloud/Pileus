@@ -1,0 +1,98 @@
+#!/usr/bin/perl
+#
+# check-config -- check the current config for issues
+#
+use strict;
+
+my $P = 'check-config';
+
+my $test = -1;
+if ($ARGV[0] eq '--test') {
+	$test = $ARGV[1] + 0;
+} elsif ($#ARGV != 4) {
+	die "Usage: $P <config> <arch> <flavour> <commonconfig> <warn-only>\n";
+}
+
+my ($config, $arch, $flavour, $commonconfig, $warn_only) = @ARGV;
+
+my %values = ();
+
+# If we are in overridden then still perform the checks and emit the messages
+# but do not return failure.  Those items marked FATAL will alway trigger
+# failure.
+my $fail_exit = 1;
+$fail_exit = 0 if ($warn_only eq 'true' || $warn_only eq '1');
+my $exit_val = 0;
+
+# Load up the current configuration values -- FATAL if this fails
+print "$P: $config: loading config\n";
+open(CONFIG, "<$config") || die "$P: $config: open failed -- $! -- aborting\n";
+while (<CONFIG>) {
+	# Pull out values.
+	/^#*\s*(CONFIG_\w+)[\s=](.*)$/ or next;
+	if ($2 eq 'is not set') {
+		$values{$1} = 'n';
+	} else {
+		$values{$1} = $2;
+	}
+}
+close(CONFIG);
+
+# ANNOTATIONS: check any annotations marked for enforcement
+my $pass = 0;
+my $total = 0;
+my $annotations = "$commonconfig/annotations";
+my ($config, $value, $options, $option, $value, $check, $policy);
+print "$P: $annotations loading annotations\n";
+open(ANNOTATIONS, "<$annotations") || die "$P: $annotations: open failed -- $! -- aborting\n";
+while (<ANNOTATIONS>) {
+	/^#/ && next;
+	chomp;
+	/^$/ && next;
+
+	$check = 0;
+	($config, $value, $options) = split(' ', $_, 3);
+	$policy = { '*' => $value };
+	while ($options =~ /\s*(\S+)<(.*?)?>/g) {
+		($option, $value) = ($1, $2);
+
+		if ($option eq 'mark' && $value eq 'ENFORCED') {
+			$check = 1;
+
+		} elsif ($option eq 'policy') {
+			if ($value =~ /^{/) {
+				$value =~ s/:/=>/g;
+				$policy = eval($value);
+			} else {
+				$policy = undef;
+			}
+		}
+	}
+	if ($check == 1 && $policy == undef) {
+		print "$P: INVALID $_\n";
+		$total++;
+	}
+	if ($check) {
+		my $is = '-';
+		$is = $values{$config} if (defined $values{$config});
+
+		my $value = '-';
+		for my $which ("$arch-$flavour", "$arch-*", "*-$flavour", "$arch", "*") {
+			if (defined $policy->{$which}) {
+				$value = $policy->{$which};
+				last;
+			}
+		}
+		if ($is eq $value) {
+			$pass++;
+		} else {
+			print "$P: FAIL ($is != $value): $_\n";
+			$exit_val = $fail_exit;
+		}
+		$total++;
+	}
+}
+close(ANNOTATIONS);
+
+print "$P: $pass/$total checks passed -- exit $exit_val\n";
+exit $exit_val;

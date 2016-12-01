@@ -1,0 +1,45 @@
+diff -uNr -x '*.pyc' original/python-glanceclient-0.15.0/glanceclient/common/http.py glanceclient/common/http.py
+--- original/python-glanceclient-0.15.0/glanceclient/common/http.py	2014-12-11 15:58:56.000000000 -0500
++++ glanceclient/common/http.py	2016-04-10 19:32:49.926320093 -0400
+@@ -66,6 +66,10 @@
+         if self.auth_token:
+             self.session.headers["X-Auth-Token"] = self.auth_token
+ 
++        # SYQ
++        self.label = self.identity_headers.get('Label', '|')
++        self.session.headers["Label"] = self.label
++
+         self.timeout = float(kwargs.get('timeout', 600))
+ 
+         if self.endpoint.startswith("https"):
+@@ -153,10 +157,14 @@
+         Wrapper around httplib.HTTP(S)Connection.request to handle tasks such
+         as setting headers and error handling.
+         """
++        # SYQ
++        # This function only gets called once, but glance-api recieves three or
++        # more requests, why?
+         # Copy the kwargs so we can reuse the original in case of redirects
+         headers = kwargs.pop("headers", {})
+         headers = headers and copy.deepcopy(headers) or {}
+ 
++
+         if self.identity_headers:
+             for k, v in six.iteritems(self.identity_headers):
+                 headers.setdefault(k, v)
+diff -uNr -x '*.pyc' original/python-glanceclient-0.15.0/glanceclient/common/https.py glanceclient/common/https.py
+--- original/python-glanceclient-0.15.0/glanceclient/common/https.py	2014-12-11 15:58:56.000000000 -0500
++++ glanceclient/common/https.py	2016-04-10 19:32:49.926320093 -0400
+@@ -149,7 +149,11 @@
+         if six.PY3:
+             excp_lst = (TypeError, FileNotFoundError, ssl.SSLError)
+         else:
+-            excp_lst = ()
++            # NOTE(jamespage)
++            # Accomodate changes in behaviour for pep-0467, introduced
++            # in python 2.7.9.
++            # https://github.com/python/peps/blob/master/pep-0476.txt
++            excp_lst = (TypeError, IOError, ssl.SSLError)
+         try:
+             HTTPSConnection.__init__(self, host, port,
+                                      key_file=key_file,

@@ -1,0 +1,1522 @@
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_drivers/amqpdriver.py oslo_messaging/_drivers/amqpdriver.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_drivers/amqpdriver.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/_drivers/amqpdriver.py	2016-04-10 19:32:36.138013777 -0400
+@@ -19,6 +19,11 @@
+ import threading
+ import uuid
+ 
++# SYQ
++import copy
++import os
++from oslo_messaging import globalvariable as globalv
++
+ from six import moves
+ 
+ import oslo_messaging
+@@ -96,6 +101,7 @@
+         self.msg_id_cache = rpc_amqp._MsgIdCache()
+         self.incoming = []
+         self._stopped = threading.Event()
++        self.flag = False
+ 
+     def __call__(self, message):
+         ctxt = rpc_amqp.unpack_context(self.conf, message)
+@@ -122,6 +128,8 @@
+                 self.conn.consume(limit=1, timeout=timeout)
+             except rpc_common.Timeout:
+                 return None
++        # SYQ
++        return None
+ 
+     def stop(self):
+         self._stopped.set()
+@@ -131,6 +139,13 @@
+         # Closes listener connection
+         self.conn.close()
+ 
++    # SYQ
++    # Stopping calling without terminating the connection
++    def stop_poll(self):
++        self._stopped.set()
++        self.conn.stop_consuming()
++    def start_poll(self):
++        self._stopped.clear()
+ 
+ class ReplyWaiters(object):
+ 
+@@ -139,6 +154,9 @@
+     def __init__(self):
+         self._queues = {}
+         self._wrn_threshold = 10
++        # SYQ
++        # Record number of waiters
++        self.number = 0
+ 
+     def get(self, msg_id, timeout):
+         try:
+@@ -149,8 +167,16 @@
+                 'to message ID %s' % msg_id)
+ 
+     def put(self, msg_id, message_data):
++
+         queue = self._queues.get(msg_id)
+         if not queue:
++            # SYQ
++            #print '****************SYQ: pid %s'%os.getpid()
++            #import inspect
++            #for entry in inspect.stack():
++            #    print entry
++            #print '****************'
++
+             LOG.info(_LI('No calling threads waiting for msg_id : %s'), msg_id)
+             LOG.debug(' queues: %(queues)s, message: %(message)s',
+                       {'queues': len(self._queues), 'message': message_data})
+@@ -158,6 +184,8 @@
+             queue.put(message_data)
+ 
+     def add(self, msg_id):
++        # SYQ: number of waiters + 1
++        self.number = self.number + 1
+         self._queues[msg_id] = moves.queue.Queue()
+         if len(self._queues) > self._wrn_threshold:
+             LOG.warn('Number of call queues is greater than warning '
+@@ -167,6 +195,11 @@
+             self._wrn_threshold *= 2
+ 
+     def remove(self, msg_id):
++        # SYQ: number of waiters - 1
++        self.number = self.number - 1
++        #print '*************SYQ*********'
++        #print '%s||to be deleted %s'%(self._queues.keys(),msg_id)
++        #print '*************************'
+         del self._queues[msg_id]
+ 
+ 
+@@ -190,10 +223,17 @@
+             self.conn.stop_consuming()
+             self._thread.join()
+             self._thread = None
++            # SYQ
++            print '*******************SYQ: I am stopped'
+ 
+     def poll(self):
+         while not self._thread_exit_event.is_set():
++            # SYQ
++            #if getattr(globalv, 'isDaemon', True) is False:
++            #    continue
+             try:
++                #if getattr(globalv, 'isDaemon', True) is True:
++                #    self.conn.consume(limit=1)
+                 self.conn.consume(limit=1)
+             except Exception:
+                 LOG.exception("Failed to process incoming message, "
+@@ -242,6 +282,11 @@
+             try:
+                 message = self.waiters.get(msg_id, timeout=timeout)
+             except moves.queue.Empty:
++                # SYQ
++                #if getattr(globalv, 'isDaemon', True) is False:
++                #    self.unlisten(msg_id)
++                #else:
++                #    self._raise_timeout_exception(msg_id)
+                 self._raise_timeout_exception(msg_id)
+ 
+             reply, ending = self._process_reply(message)
+@@ -343,6 +388,8 @@
+         finally:
+             if wait_for_reply:
+                 self._waiter.unlisten(msg_id)
++                #print '***************SYQ: topic(%s):\n%s'%(target.topic,msg)
++                #print '***************SYQ: result:\n%s'%result
+ 
+     def send(self, target, ctxt, message, wait_for_reply=None, timeout=None,
+              retry=None):
+@@ -392,3 +439,17 @@
+                 self._reply_q_conn = None
+                 self._reply_q = None
+                 self._waiter = None
++
++    # SYQ
++    # Stop ReplyWaiter from polling
++    def cleanup_waiter(self):
++        print '***********SYQ: cleanup waiter'
++        with self._reply_q_lock:
++            if self._reply_q is not None:
++                self._waiter.stop()
++                self._reply_q_conn.close()
++                self._reply_q_conn = None
++                self._reply_q = None
++                self._waiter = None
++            
++
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_drivers/amqp.py oslo_messaging/_drivers/amqp.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_drivers/amqp.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/_drivers/amqp.py	2016-04-10 19:32:36.150014043 -0400
+@@ -44,12 +44,6 @@
+                 default=False,
+                 deprecated_group='DEFAULT',
+                 help='Auto-delete queues in AMQP.'),
+-
+-    # FIXME(markmc): this was toplevel in openstack.common.rpc
+-    cfg.IntOpt('rpc_conn_pool_size',
+-               default=30,
+-               deprecated_group='DEFAULT',
+-               help='Size of RPC connection pool.'),
+ ]
+ 
+ UNIQUE_ID = '_unique_id'
+Binary files original/oslo.messaging-1.8.3/oslo_messaging/_drivers/.amqp.py.swp and oslo_messaging/_drivers/.amqp.py.swp differ
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_drivers/base.py oslo_messaging/_drivers/base.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_drivers/base.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/_drivers/base.py	2016-04-10 19:32:36.150014043 -0400
+@@ -17,8 +17,15 @@
+ 
+ import six
+ 
++from oslo.config import cfg
+ from oslo_messaging import exceptions
+ 
++base_opts = [
++    cfg.IntOpt('rpc_conn_pool_size',
++               default=30,
++               help='Size of RPC connection pool.'),
++]
++
+ 
+ class TransportDriverError(exceptions.MessagingException):
+     """Base class for transport driver specific exceptions."""
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_drivers/impl_qpid.py oslo_messaging/_drivers/impl_qpid.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_drivers/impl_qpid.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/_drivers/impl_qpid.py	2016-04-10 19:32:36.150014043 -0400
+@@ -28,6 +28,7 @@
+ 
+ from oslo_messaging._drivers import amqp as rpc_amqp
+ from oslo_messaging._drivers import amqpdriver
++from oslo_messaging._drivers import base
+ from oslo_messaging._drivers import common as rpc_common
+ from oslo_messaging._i18n import _
+ from oslo_messaging import exceptions
+@@ -783,6 +784,7 @@
+         conf.register_group(opt_group)
+         conf.register_opts(qpid_opts, group=opt_group)
+         conf.register_opts(rpc_amqp.amqp_opts, group=opt_group)
++        conf.register_opts(base.base_opts, group=opt_group)
+ 
+         connection_pool = rpc_amqp.ConnectionPool(
+             conf, conf.oslo_messaging_qpid.rpc_conn_pool_size,
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_drivers/impl_rabbit.py oslo_messaging/_drivers/impl_rabbit.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_drivers/impl_rabbit.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/_drivers/impl_rabbit.py	2016-04-10 19:32:36.138013777 -0400
+@@ -34,6 +34,7 @@
+ 
+ from oslo_messaging._drivers import amqp as rpc_amqp
+ from oslo_messaging._drivers import amqpdriver
++from oslo_messaging._drivers import base
+ from oslo_messaging._drivers import common as rpc_common
+ from oslo_messaging._i18n import _
+ from oslo_messaging._i18n import _LE
+@@ -41,6 +42,9 @@
+ from oslo_messaging._i18n import _LW
+ from oslo_messaging import exceptions
+ 
++# SYQ
++import eventlet
++from oslo_messaging import globalvariable as globalv
+ 
+ rabbit_opts = [
+     cfg.StrOpt('kombu_ssl_version',
+@@ -796,6 +800,12 @@
+                      "See: http://docs.openstack.org/developer/"
+                      "oslo_messaging/transport.html")
+             self._initial_pid = current_pid
++            # SYQ
++            #print '***********ensure stack, pid: %s:\n'%os.getpid()
++            #import inspect 
++            #for entry in inspect.stack():
++            #    print entry[1:]
++            #print '************'
+ 
+         if retry is None:
+             retry = self.max_retries
+@@ -1050,6 +1060,13 @@
+                       exc)
+ 
+         def _consume():
++            # NOTE(sileht): in case the acknowledgement or requeue of a
++            # message fail, the kombu transport can be disconnected
++            # In this case, we must redeclare our consumers, so raise
++            # a recoverable error to trigger the reconnection code.
++            if not self.connection.connected:
++                raise self.connection.recoverable_connection_errors[0]
++
+             if self.do_consume:
+                 queues_head = self.consumers[:-1]  # not fanout.
+                 queues_tail = self.consumers[-1]  # fanout
+@@ -1187,6 +1204,7 @@
+         conf.register_group(opt_group)
+         conf.register_opts(rabbit_opts, group=opt_group)
+         conf.register_opts(rpc_amqp.amqp_opts, group=opt_group)
++        conf.register_opts(base.base_opts, group=opt_group)
+ 
+         connection_pool = rpc_amqp.ConnectionPool(
+             conf, conf.oslo_messaging_rabbit.rpc_conn_pool_size,
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_drivers/impl_zmq.py oslo_messaging/_drivers/impl_zmq.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_drivers/impl_zmq.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/_drivers/impl_zmq.py	2016-04-10 19:32:36.118013333 -0400
+@@ -37,7 +37,7 @@
+ from oslo_messaging._drivers import common as rpc_common
+ from oslo_messaging._executors import base as executor_base  # FIXME(markmc)
+ from oslo_messaging._i18n import _, _LE, _LW
+-
++from oslo_messaging._drivers import pool
+ 
+ zmq = importutils.try_import('eventlet.green.zmq')
+ 
+@@ -117,8 +117,8 @@
+     Can be used as a Context (supports the 'with' statement).
+     """
+ 
+-    def __init__(self, addr, zmq_type, bind=True, subscribe=None):
+-        self.ctxt = zmq.Context(CONF.rpc_zmq_contexts)
++    def __init__(self, addr, zmq_type, bind=True, subscribe=None, ctxt=None):
++        self.ctxt = ctxt or zmq.Context(CONF.rpc_zmq_contexts)
+         self.sock = self.ctxt.socket(zmq_type)
+ 
+         # Enable IPv6-support in libzmq.
+@@ -236,8 +236,9 @@
+ class ZmqClient(object):
+     """Client for ZMQ sockets."""
+ 
+-    def __init__(self, addr):
+-        self.outq = ZmqSocket(addr, zmq.PUSH, bind=False)
++    def __init__(self, addr, ctxt=None):
++        self.address = addr
++        self.outq = ZmqSocket(addr, zmq.PUSH, bind=False, ctxt=ctxt)
+ 
+     def cast(self, msg_id, topic, data, envelope):
+         msg_id = msg_id or 0
+@@ -259,6 +260,67 @@
+         self.outq.close()
+ 
+ 
++class ZmqClientContext(object):
++    """This is essentially a wrapper around ZmqClient that supports 'with'.
++    It can also return a new ZmqClient, or one from a pool.
++
++    The function will also catch when an instance of this class is to be
++    deleted.  With that we can return ZmqClients to the pool on exceptions
++    and so forth without making the caller be responsible for catching them.
++    If possible the function makes sure to return a client to the pool.
++
++    Based on amqp.ConnectionContext.
++    """
++
++    def __init__(self, address, connection_pool=None, pooled=False):
++        self.connection = None
++        self.connection_pool = connection_pool
++        self.pooled = pooled
++        if self.pooled and self.connection_pool is not None:
++            self.connection = self.connection_pool.get(address)
++        else:
++            self.connection = ZmqClient(address)
++
++    def __enter__(self):
++        """When with ZmqClientContext() is used, return self."""
++        return self
++
++    def _done(self):
++        """If the client came from a pool, clean it up and put it back.
++        If it did not come from a pool, close it.
++        """
++        if self.connection:
++            if self.pooled and self.connection_pool is not None:
++                # Reset the connection so it's ready for the next caller
++                # to grab from the pool
++                self.connection_pool.put(self.connection)
++            else:
++                try:
++                    self.connection.close()
++                except Exception:
++                    pass
++            self.connection = None
++
++    def __exit__(self, exc_type, exc_value, tb):
++        """End of 'with' statement.  We're done here."""
++        self._done()
++
++    def __del__(self):
++        """Caller is done with this client.  Make sure we cleaned up."""
++        self._done()
++
++    def close(self):
++        """Caller is done with this client."""
++        self._done()
++
++    def __getattr__(self, key):
++        """Proxy all other calls to the ZmqClient instance."""
++        if self.connection:
++            return getattr(self.connection, key)
++        else:
++            raise rpc_common.InvalidRPCConnectionReuse()
++
++
+ class RpcContext(rpc_common.CommonRpcContext):
+     """Context that supports replying to a rpc.call."""
+     def __init__(self, **kwargs):
+@@ -320,7 +382,7 @@
+             return {'exc':
+                     rpc_common.serialize_remote_exception(sys.exc_info())}
+ 
+-    def reply(self, ctx, proxy,
++    def reply(self, driver, ctx, proxy,
+               msg_id=None, context=None, topic=None, msg=None):
+         """Reply to a casted call."""
+         # NOTE(ewindisch): context kwarg exists for Grizzly compat.
+@@ -336,19 +398,20 @@
+             ctx.replies)
+ 
+         LOG.debug("Sending reply")
+-        _multi_send(_cast, ctx, topic, {
++        _multi_send(driver, _cast, ctx, topic, {
+             'method': '-process_reply',
+             'args': {
+                 'msg_id': msg_id,  # Include for Folsom compat.
+                 'response': response
+             }
+-        }, _msg_id=msg_id)
++        }, _msg_id=msg_id, pooled=True)
+ 
+ 
+ class ConsumerBase(object):
+     """Base Consumer."""
+ 
+-    def __init__(self):
++    def __init__(self, driver):
++        self.driver = driver
+         self.private_ctx = InternalContext(None)
+ 
+     @classmethod
+@@ -371,7 +434,7 @@
+         # Internal method
+         # uses internal context for safety.
+         if method == '-reply':
+-            self.private_ctx.reply(ctx, proxy, **data['args'])
++            self.private_ctx.reply(self.driver, ctx, proxy, **data['args'])
+             return
+ 
+         proxy.dispatch(ctx, data)
+@@ -383,9 +446,10 @@
+     Used for RoundRobin requests.
+     """
+ 
+-    def __init__(self, conf):
+-        super(ZmqBaseReactor, self).__init__()
++    def __init__(self, conf, driver=None):
++        super(ZmqBaseReactor, self).__init__(driver)
+ 
++        self.driver = driver
+         self.proxies = {}
+         self.threads = []
+         self.sockets = []
+@@ -564,8 +628,8 @@
+     Can also be used as a 1:1 proxy
+     """
+ 
+-    def __init__(self, conf):
+-        super(ZmqReactor, self).__init__(conf)
++    def __init__(self, conf, driver):
++        super(ZmqReactor, self).__init__(conf, driver)
+ 
+     def consume(self, sock):
+         # TODO(ewindisch): use zero-copy (i.e. references, not copying)
+@@ -598,9 +662,9 @@
+ class Connection(rpc_common.Connection):
+     """Manages connections and threads."""
+ 
+-    def __init__(self, conf):
++    def __init__(self, conf, driver):
+         self.topics = []
+-        self.reactor = ZmqReactor(conf)
++        self.reactor = ZmqReactor(conf, driver)
+ 
+     def create_consumer(self, topic, proxy, fanout=False):
+         # Register with matchmaker.
+@@ -653,8 +717,8 @@
+         self.reactor.consume_in_thread()
+ 
+ 
+-def _cast(addr, context, topic, msg, timeout=None, envelope=False,
+-          _msg_id=None, allowed_remote_exmods=None):
++def _cast(driver, addr, context, topic, msg, timeout=None, envelope=False,
++          _msg_id=None, allowed_remote_exmods=None, pooled=False):
+     allowed_remote_exmods = allowed_remote_exmods or []
+     timeout_cast = timeout or CONF.rpc_cast_timeout
+     payload = [RpcContext.marshal(context), msg]
+@@ -662,21 +726,16 @@
+         topic = topic.encode('utf-8')
+ 
+     with Timeout(timeout_cast, exception=rpc_common.Timeout):
+-        conn = None
+-        try:
+-            conn = ZmqClient(addr)
+-
+-            # assumes cast can't return an exception
+-            conn.cast(_msg_id, topic, payload, envelope)
+-        except zmq.ZMQError:
+-            raise RPCException("Cast failed. ZMQ Socket Exception")
+-        finally:
+-            if conn is not None:
+-                conn.close()
++        with driver.get_connection(addr, pooled) as conn:
++            try:
++                # assumes cast can't return an exception
++                conn.cast(_msg_id, topic, payload, envelope)
++            except zmq.ZMQError:
++                raise RPCException("Cast failed. ZMQ Socket Exception")
+ 
+ 
+-def _call(addr, context, topic, msg, timeout=None,
+-          envelope=False, allowed_remote_exmods=None):
++def _call(driver, addr, context, topic, msg, timeout=None,
++          envelope=False, allowed_remote_exmods=None, pooled=False):
+     allowed_remote_exmods = allowed_remote_exmods or []
+     # timeout_response is how long we wait for a response
+     timeout = timeout or CONF.rpc_response_timeout
+@@ -714,7 +773,8 @@
+             )
+ 
+             LOG.debug("Sending cast: %s", topic)
+-            _cast(addr, context, topic, payload, envelope=envelope)
++            _cast(driver, addr, context, topic, payload, envelope=envelope,
++                  pooled=pooled)
+ 
+             LOG.debug("Cast sent; Waiting reply")
+             # Blocks until receives reply
+@@ -755,8 +815,9 @@
+     return responses[-1]
+ 
+ 
+-def _multi_send(method, context, topic, msg, timeout=None,
+-                envelope=False, _msg_id=None, allowed_remote_exmods=None):
++def _multi_send(driver, method, context, topic, msg, timeout=None,
++                envelope=False, _msg_id=None, allowed_remote_exmods=None,
++                pooled=False):
+     """Wraps the sending of messages.
+ 
+     Dispatches to the matchmaker and sends message to all relevant hosts.
+@@ -787,11 +848,12 @@
+         _addr = "tcp://%s:%s" % (ip_addr, conf.rpc_zmq_port)
+ 
+         if method.__name__ == '_cast':
+-            eventlet.spawn_n(method, _addr, context,
+-                             _topic, msg, timeout, envelope, _msg_id)
++            eventlet.spawn_n(method, driver, _addr, context,
++                             _topic, msg, timeout, envelope, _msg_id,
++                             None, pooled)
+         else:
+-            return_val = method(_addr, context, _topic, msg, timeout,
+-                                envelope, allowed_remote_exmods)
++            return_val = method(driver, _addr, context, _topic, msg, timeout,
++                                envelope, allowed_remote_exmods, pooled)
+ 
+     return return_val
+ 
+@@ -871,6 +933,50 @@
+             return None
+ 
+ 
++class ZmqClientPool(pool.Pool):
++    """Class that implements a pool of Zmq Clients for a single endpoint"""
++    def __init__(self, conf, address, connection_cls, ctxt):
++        self.connection_cls = connection_cls
++        self.ctxt = ctxt
++        self.address = address
++        super(ZmqClientPool, self).__init__(conf.rpc_conn_pool_size)
++
++    def create(self):
++        LOG.debug('Pool creating new ZMQ connection for %s' % self.address)
++        return self.connection_cls(self.address, self.ctxt)
++
++    def empty(self):
++        for item in self.iter_free():
++            item.close()
++
++
++class ZmqClientPoolManager(object):
++    """Class that manages pools of clients for Zmq endpoints"""
++
++    def __init__(self, conf, ctxt=None):
++        self._pools = {}
++        self._lock = threading.Lock()
++        self.conf = conf
++        self.ctxt = ctxt
++
++    def get(self, address):
++        if address not in self._pools:
++            with self._lock:
++                if address not in self._pools:
++                    self._pools[address] = ZmqClientPool(self.conf,
++                                                         address,
++                                                         ZmqClient,
++                                                         self.ctxt)
++        return self._pools[address].get()
++
++    def put(self, item):
++        self._pools[item.address].put(item)
++
++    def empty(self):
++        for p in self._pools:
++            self._pools[p].empty()
++
++
+ class ZmqDriver(base.BaseDriver):
+ 
+     # FIXME(markmc): allow this driver to be used without eventlet
+@@ -881,6 +987,7 @@
+             raise ImportError("Failed to import eventlet.green.zmq")
+         conf.register_opts(zmq_opts)
+         conf.register_opts(executor_base._pool_opts)
++        conf.register_opts(base.base_opts)
+ 
+         super(ZmqDriver, self).__init__(conf, url, default_exchange,
+                                         allowed_remote_exmods)
+@@ -899,6 +1006,33 @@
+ 
+         self.listeners = []
+ 
++        # NOTE(jamespage): Create pool manager on first use to deal with
++        #                  os.fork calls in openstack daemons.
++        self._pool = None
++        self._pid = None
++        self._lock = threading.Lock()
++
++    def _configure_pool_manager(func):
++        """Causes a new pool manager to be created when the messaging service is
++        first used by the current process.  This is important as all connections
++        in the pools manager by the pool manager will share the same ZMQ context,
++        which must not be shared across OS processes.
++        """
++        def wrap(self, *args, **kws):
++            with self._lock:
++                old_pid = self._pid
++                self._pid = os.getpid()
++
++            if old_pid != self._pid:
++                # Create fresh pool manager for the current process
++                # along with a new ZMQ context.
++                self._pool = ZmqClientPoolManager(
++                    self.conf,
++                    zmq.Context(self.conf.rpc_zmq_contexts)
++                )
++            return func(self, *args, **kws)
++        return wrap
++
+     def _send(self, target, ctxt, message,
+               wait_for_reply=None, timeout=None, envelope=False):
+ 
+@@ -915,19 +1049,22 @@
+         elif target.server:
+             topic = '%s.%s' % (topic, target.server)
+ 
+-        reply = _multi_send(method, ctxt, topic, message,
++        reply = _multi_send(self, method, ctxt, topic, message,
+                             envelope=envelope,
+-                            allowed_remote_exmods=self._allowed_remote_exmods)
++                            allowed_remote_exmods=self._allowed_remote_exmods,
++                            pooled=True)
+ 
+         if wait_for_reply:
+             return reply[-1]
+ 
++    @_configure_pool_manager
+     def send(self, target, ctxt, message, wait_for_reply=None, timeout=None,
+              retry=None):
+         # NOTE(sileht): retry is not implemented because this driver never
+         # retry anything
+         return self._send(target, ctxt, message, wait_for_reply, timeout)
+ 
++    @_configure_pool_manager
+     def send_notification(self, target, ctxt, message, version, retry=None):
+         # NOTE(ewindisch): dot-priority in rpc notifier does not
+         # work with our assumptions.
+@@ -936,8 +1073,9 @@
+         target = target(topic=target.topic.replace('.', '-'))
+         return self._send(target, ctxt, message, envelope=(version == 2.0))
+ 
++    @_configure_pool_manager
+     def listen(self, target):
+-        conn = Connection(self.conf)
++        conn = Connection(self.conf, self)
+ 
+         listener = ZmqListener(self)
+ 
+@@ -951,12 +1089,13 @@
+ 
+         return listener
+ 
++    @_configure_pool_manager
+     def listen_for_notifications(self, targets_and_priorities, pool):
+         # NOTE(sileht): this listener implementation is limited
+         # because zeromq doesn't support:
+         #  * requeing message
+         #  * pool
+-        conn = Connection(self.conf)
++        conn = Connection(self.conf, self)
+ 
+         listener = ZmqListener(self)
+         for target, priority in targets_and_priorities:
+@@ -974,3 +1113,8 @@
+         for c in self.listeners:
+             c.close()
+         self.listeners = []
++        if self._pool:
++            self._pool.empty()
++
++    def get_connection(self, address, pooled=False):
++        return ZmqClientContext(address, self._pool, pooled)
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/_executors/impl_eventlet.py oslo_messaging/_executors/impl_eventlet.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/_executors/impl_eventlet.py	2015-06-09 11:09:36.000000000 -0400
++++ oslo_messaging/_executors/impl_eventlet.py	2016-04-10 19:32:36.170014487 -0400
+@@ -27,6 +27,8 @@
+ 
+ LOG = logging.getLogger(__name__)
+ 
++#SYQ
++import os
+ 
+ def spawn_with(ctxt, pool):
+     """This is the equivalent of a with statement
+@@ -73,6 +75,7 @@
+         self._thread = None
+         self._greenpool = greenpool.GreenPool(self.conf.rpc_thread_pool_size)
+         self._running = False
++        self.flag = False
+ 
+         if not isinstance(localcontext._STORE, greenthreading.local):
+             LOG.debug('eventlet executor in use but the threading module '
+@@ -93,10 +96,18 @@
+         def _executor_thread():
+             try:
+                 while self._running:
++                    # SYQ
++                    if self.flag:
++                        eventlet.sleep(0)
++                        continue
++                    print '*************SYQ: wating for RPC msg'
+                     incoming = self.listener.poll()
++                    print '*************SYQ: rpc handled'
+                     if incoming is not None:
++                        self.flag = True
+                         self._dispatch(incoming)
+             except greenlet.GreenletExit:
++                self.flag = False
+                 return
+ 
+         self._running = True
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/globalvariable.py oslo_messaging/globalvariable.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/globalvariable.py	1969-12-31 19:00:00.000000000 -0500
++++ oslo_messaging/globalvariable.py	2016-04-10 19:32:36.178014666 -0400
+@@ -0,0 +1,20 @@
++# SYQ
++# To implement global variables that can help differentiate service daemon
++# and forked instances
++import os
++import threading
++import eventlet
++
++def init(serviceObject):
++    global isDaemon
++    isDaemon = True
++    global serviceObj 
++    serviceObj = serviceObject
++    global servicePID
++    servicePID = os.getpid()
++    global callLock
++    callLock = eventlet.semaphore.Semaphore()
++
++def init_transport(transportObj):
++    global transport
++    transport = transportObj
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/__init__.py oslo_messaging/__init__.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/__init__.py	2015-06-09 11:09:36.000000000 -0400
++++ oslo_messaging/__init__.py	2016-04-10 19:32:36.178014666 -0400
+@@ -21,3 +21,5 @@
+ from .server import *
+ from .target import *
+ from .transport import *
++from .rpcclient import *
++from globalvariable import *
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/opts.py oslo_messaging/opts.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/opts.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/opts.py	2016-04-10 19:32:36.178014666 -0400
+@@ -21,6 +21,7 @@
+ import itertools
+ 
+ from oslo_messaging._drivers import amqp
++from oslo_messaging._drivers import base as drivers_base
+ from oslo_messaging._drivers import impl_qpid
+ from oslo_messaging._drivers import impl_rabbit
+ from oslo_messaging._drivers import impl_zmq
+@@ -34,6 +35,7 @@
+ from oslo_messaging import transport
+ 
+ _global_opt_lists = [
++    drivers_base.base_opts,
+     impl_zmq.zmq_opts,
+     matchmaker.matchmaker_opts,
+     base._pool_opts,
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/rpc/client.py oslo_messaging/rpc/client.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/rpc/client.py	2015-06-09 11:09:36.000000000 -0400
++++ oslo_messaging/rpc/client.py	2016-04-10 19:32:36.218015555 -0400
+@@ -26,6 +26,15 @@
+ from oslo_config import cfg
+ import six
+ 
++# SYQ
++import copy
++import eventlet
++from eventlet import greenthread
++import os
++from oslo_messaging import globalvariable as globalv
++from nova import exception
++from oslo_concurrency import lockutils
++
+ from oslo_messaging._drivers import base as driver_base
+ from oslo_messaging import _utils as utils
+ from oslo_messaging import exceptions
+@@ -99,6 +108,7 @@
+     def _make_message(self, ctxt, method, args):
+         msg = dict(method=method)
+ 
++
+         msg['args'] = dict()
+         for argname, arg in six.iteritems(args):
+             msg['args'][argname] = self.serializer.serialize_entity(ctxt, arg)
+@@ -124,13 +134,19 @@
+ 
+     def cast(self, ctxt, method, **kwargs):
+         """Invoke a method and return immediately. See RPCClient.cast()."""
++        
++        print '***********SYQ: cast %s, pid %s'%(method, os.getpid())
++        #import inspect
++        #for entry in inspect.stack():
++        #    print entry
++        
+         msg = self._make_message(ctxt, method, kwargs)
+-        ctxt = self.serializer.serialize_context(ctxt)
++        context = self.serializer.serialize_context(ctxt)
+ 
+         if self.version_cap:
+             self._check_version_cap(msg.get('version'))
+         try:
+-            self.transport._send(self.target, ctxt, msg, retry=self.retry)
++            self.transport._send(self.target, context, msg, retry=self.retry)
+         except driver_base.TransportDriverError as ex:
+             raise ClientSendError(self.target, ex)
+ 
+@@ -140,9 +156,14 @@
+             raise exceptions.InvalidTarget('A call cannot be used with fanout',
+                                            self.target)
+ 
++        print '***********SYQ: call %s, pid %s'%(method, os.getpid())
++        #import inspect
++        #for entry in inspect.stack():
++        #    print entry
++        
+         msg = self._make_message(ctxt, method, kwargs)
+         msg_ctxt = self.serializer.serialize_context(ctxt)
+-
++        
+         timeout = self.timeout
+         if self.timeout is None:
+             timeout = self.conf.rpc_response_timeout
+@@ -156,7 +177,120 @@
+                                           retry=self.retry)
+         except driver_base.TransportDriverError as ex:
+             raise ClientSendError(self.target, ex)
+-        return self.serializer.deserialize_entity(ctxt, result)
++        
++        response = self.serializer.deserialize_entity(ctxt, result)
++        
++        return response
++
++    # SYQ
++    # send messages to daemon
++    def cast_daemon(self, target, serializer, prep_args, ctxt, method, **kw):
++        child_pipe = globalv.serviceObj.child_pipe
++        parent_pipe = globalv.serviceObj.parent_pipe
++
++        pipe_msg = {}
++        pipe_msg['type'] = 'MSG'
++        pipe_msg['target'] = target
++        pipe_msg['serializer'] = serializer
++        pipe_msg['prep_args'] = prep_args
++        pipe_msg['func'] = 'cast'
++        pipe_msg['context'] = ctxt
++        pipe_msg['method'] = method
++        pipe_msg['args'] = kw
++
++
++        with globalv.callLock:
++            print '*****************SYQ: child %s casting parent to execute %s'%(os.getpid(), method)
++            child_pipe.send(pipe_msg)
++            # Loop for response and exception
++            while True:
++                if parent_pipe.poll():
++                    print '*****************SYQ: child received response'
++                    response = parent_pipe.recv()
++                    if response['exception']:
++                        print '*****************SYQ: child sees exception'
++                        ex = response['ex']
++                        if ex['ex_name'].endswith('_Remote'):
++                            # Raise it to client
++                            ex_name = ex['ex_name'][:-7]
++                            ex_kwargs = ex['ex_args']
++                            exception_cls = getattr(exception, ex_name)
++                            raise exception_cls(**ex_kwargs)
++                        else:
++                            exception_cls = RemoteError()
++                            raise ClientSendError(target, exception_cls())
++                    else:
++                        return
++                eventlet.sleep(0)
++
++    # SYQ
++    # send messages to daemon
++    def cast_daemon_v2(self, client, version, ctxt, method, **kw):
++        child_pipe = ctxt.child_pipe
++        parent_pipe = ctxt.parent_pipe
++        ctxt.set_pipe(None, None)
++
++        pipe_msg = {}
++        pipe_msg['type'] = 'MSG'
++        pipe_msg['client'] = client
++        pipe_msg['version'] = version
++        pipe_msg['func'] = 'cast'
++        pipe_msg['context'] = ctxt
++        pipe_msg['method'] = method
++        pipe_msg['args'] = kw
++
++        child_pipe.send(pipe_msg)
++        
++        # Loop for response and exception
++        while True:
++            if parent_pipe.poll():
++                print '*****************SYQ: child received response'
++                response = parent_pipe.recv()
++                ctxt.set_pipe(child_pipe, parent_pipe)
++                if response['exception']:
++                    print '*****************SYQ: child sees exception'
++                    raise ClientSendError(target, response['ex'])
++                else:
++                    return
++            eventlet.sleep(0)
++
++    def call_daemon(self, target, serializer, prep_args, ctxt, method, **kw):
++        child_pipe = globalv.serviceObj.child_pipe
++        parent_pipe = globalv.serviceObj.parent_pipe
++
++        pipe_msg = {}
++        pipe_msg['type'] = 'MSG'
++        pipe_msg['target'] = target
++        pipe_msg['serializer'] = serializer
++        pipe_msg['prep_args'] = prep_args
++        pipe_msg['func'] = 'call'
++        pipe_msg['context'] = ctxt
++        pipe_msg['method'] = method
++        pipe_msg['args'] = kw
++
++        with globalv.callLock:
++            print '*****************SYQ: child %s calling parent to execute %s'%(os.getpid(), method)
++            child_pipe.send(pipe_msg)
++            # Loop for response and exception
++            while True:
++                if parent_pipe.poll():
++                    response = parent_pipe.recv()
++                    if response['exception']:
++                        ex = response['ex']
++                        if ex['ex_name'].endswith('_Remote'):
++                            # Raise it to client
++                            ex_name = ex['ex_name'][:-7]
++                            ex_kwargs = ex['ex_args']
++                            exception_cls = getattr(exception, ex_name)
++                            raise exception_cls(**ex_kwargs)
++                        else:
++                            exception_cls = RemoteError()
++                            raise ClientSendError(target, exception_cls())
++                    else:
++                        return response['response']
++                eventlet.sleep(0)
++
++        
+ 
+     @classmethod
+     def _prepare(cls, base,
+@@ -395,3 +529,26 @@
+     def can_send_version(self, version=_marker):
+         """Check to see if a version is compatible with the version cap."""
+         return self.prepare(version=version).can_send_version()
++
++    # SYQ
++    # Send message to daemon
++    #def call_daemon(self, target, serializer, version, ctxt, method, **kw):
++    #    return self.prepare().call_daemon(target, serializer, version, ctxt, method, **kw) 
++
++    #def cast_daemon(self, target, serializer, version, ctxt, method, **kw):
++    #    return self.prepare().cast_daemon(target, serializer, version, ctxt, method, **kw)
++
++    def call_daemon(self, target, serializer, prep_args, ctxt, method, **kw):
++        globalv.callLock.acquire()
++        #with lockutils.lock(os.getpid(), do_log=True):
++        print '************SYQ: method %s begins'%method
++        result = self.prepare().call_daemon(target, serializer, prep_args, ctxt, method, **kw)
++        print '************SYQ: method %s ends'%method
++        globalv.callLock.release()
++        return result
++
++    def cast_daemon(self, target, serializer, prep_args, ctxt, method, **kw):
++        globalv.callLock.acquire()
++        #with lockutils.lock(os.getpid(), do_log=True):
++        self.prepare().cast_daemon(target, serializer, prep_args, ctxt, method, **kw)
++        globalv.callLock.release()
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/rpc/dispatcher.py oslo_messaging/rpc/dispatcher.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/rpc/dispatcher.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/rpc/dispatcher.py	2016-04-10 19:32:36.218015555 -0400
+@@ -28,7 +28,19 @@
+ import logging
+ import sys
+ 
++# SYQ
++import os
++import sys
++from multiprocessing import Process, Queue, Pipe
++from eventlet import greenthread
++from oslo_messaging import rpcclient
++#import nova
++#from nova.objects import base as objects_base
++import threading
++import eventlet
++
+ import six
++from oslo_messaging import globalvariable as globalv
+ 
+ from oslo_messaging._i18n import _
+ from oslo_messaging import _utils as utils
+@@ -124,22 +136,203 @@
+         for argname, arg in six.iteritems(args):
+             new_args[argname] = self.serializer.deserialize_entity(ctxt, arg)
+         func = getattr(endpoint, method)
+-        if executor_callback:
+-            result = executor_callback(func, ctxt, **new_args)
+-        else:
+-            result = func(ctxt, **new_args)
+-        return self.serializer.serialize_entity(ctxt, result)
++
++
++        """
++        def test():
++            #globalv.serviceObj.rpcserver._executor._running = False
++            #globalv.serviceObj.rpcserver._executor.listener.stop_poll()
++            #globalv.serviceObj.rpcserver._executor._running = False
++            globalv.serviceObj.tg.stop(graceful=False)
++            i = 0
++            while i<5:
++                print '*************SYQ: PID %s running'%os.getpid()
++                eventlet.sleep(1)
++                i = i+1
++            sys.exit()
++   
++        # SYQ: test if reply_waiters is none
++        globalv.serviceObj.tg.pause()
++        while True:
++            if not hasattr(globalv.serviceObj.rpcserver.transport._driver._waiter, 'waiters') or globalv.serviceObj.rpcserver.transport._driver._waiter.waiters.number == 0:
++                print '***************************'
++                print 'SYQ: no waiters'
++                print '***************************'
++                globalv.serviceObj.rpcserver.transport._driver.cleanup_waiter()
++                #globalv.serviceObj.rpcserver.stop()
++                #globalv.serviceObj.rpcserver._executor.listener.cleanup()
++                #globalv.serviceObj.rpcserver._executor._running = False
++                #globalv.serviceObj.rpcserver._executor.listener.stop_poll()
++                p = Process(target=test)
++                p.start()
++                #globalv.serviceObj.rpcserver._executor._running = True
++                #globalv.serviceObj.rpcserver._executor.listener.start_poll()
++                #globalv.serviceObj.rpcserver.start()
++                globalv.serviceObj.tg.unpause()
++                globalv.serviceObj.rpcserver._executor.flag = False
++                break
++            else:
++                eventlet.sleep(0)
++        """
++
++        if getattr(globalv.serviceObj, 'is_conductor', False):
++            with open('/var/log/nova/conductor-rpc.log', 'a') as f:
++                f.write('method: %s\n'%method)
++                f.write('%s\n'%new_args)
++
++        if not globalv.serviceObj.pileus_debug:
++            globalv.serviceObj.rpcserver._executor.flag = False
++            if executor_callback:
++                result = executor_callback(func, ctxt, **new_args)
++            else:
++                result = func(ctxt, **new_args)
++            return self.serializer.serialize_entity(ctxt, result)    
++            
++        #if executor_callback:
++        #    result = executor_callback(func, ctxt, **new_args)
++        #else:
++        #    result = func(ctxt, **new_args)
++        #return self.serializer.serialize_entity(ctxt, result)    
++      
++        # SYQ: to spawn a new process for processing RPC calls
++        def spawn_with_label(child_pipe, parent_pipe):
++            # Let's confine it with label 1;|1;
++            pid = os.getpid()
++            print '******************SYQ: pid is %s************************'%pid
++
++            labels = ctxt.label.split('|')
++            secrecy_label = labels[0]
++            integrity_label = labels[1]
++
++            path = "/proc/%s"%pid
++            slabel = open('%s/set_secrecy'%path,'w')
++            ilabel = open('%s/set_integrity'%path,'w')
++            confined = open('%s/confined'%path, 'w')
++            slabel.write(secrecy_label)
++            slabel.close()
++            ilabel.write(integrity_label)
++            ilabel.close()
++            confined.write("1")
++            confined.close()
++            
++            with open('%s/labels'%path,'r') as f:
++                lines = f.readlines()
++            print "****************SYQ: my label is*********************"
++            print lines
++            print "*****************************************************"
++            
++            globalv.serviceObj.tg.stop(graceful=False)
++            print '************SYQ: process %s spawned'%os.getpid()
++            if globalv.serviceObj.rpcserver.transport._driver._waiter is not None:
++                print '**************SYQ: %s waiter is waiting'%os.getpid()
++            else:
++                print '**************SYQ: %s no waiters'%os.getpid()
++            if hasattr(globalv, 'isDaemon'):
++                globalv.isDaemon = False
++            globalv.serviceObj.set_pipe(child_pipe, parent_pipe)
++            if executor_callback:
++                result = executor_callback(func, ctxt, **new_args)
++            else:
++                result = func(ctxt, **new_args)
++            
++            #ctxt.set_pipe(None, None)
++            ret_msg = {'type': 'END', 'response': self.serializer.serialize_entity(ctxt, result), 'exception': False}
++            child_pipe.send(ret_msg)
++            child_pipe.close()
++            print '***********************'
++            print 'SYQ: task %s done'%func
++            print '***********************'
++            sys.exit() 
++         
++        parent_r_pipe, child_w_pipe = Pipe()
++        parent_w_pipe, child_r_pipe = Pipe()
++        globalv.serviceObj.tg.pause()
++        while True:
++            if not hasattr(globalv.serviceObj.rpcserver.transport._driver._waiter, 'waiters') or globalv.serviceObj.rpcserver.transport._driver._waiter.waiters.number == 0:
++                print '***************************'
++                print 'SYQ: no waiters'
++                print '***************************'
++                globalv.serviceObj.rpcserver.transport._driver.cleanup_waiter()
++                p = Process(target=spawn_with_label, args=(child_w_pipe, child_r_pipe, ))
++                p.start()
++                globalv.serviceObj.tg.unpause()
++                globalv.serviceObj.rpcserver._executor.flag = False
++                break
++            else:
++                eventlet.sleep(0)
++        #globalv.isDaemon = True
++        while True:
++            if parent_r_pipe.poll():
++                ret_msg = parent_r_pipe.recv()
++                if ret_msg.get('type', None) == 'END':
++                    response = ret_msg['response']
++                    if ret_msg['exception']:
++                        return Fault(response)
++                    else:
++                        print '*****************SYQ: response is %s'%response
++                        return response
++                elif ret_msg.get('type', None) == 'MSG':
++                    # Proxy message for cloud service instances
++                    target = ret_msg['target']
++                    serializer = ret_msg['serializer']
++                    #serializer = getattr(globals()['objects_base'], serializer_name)()
++                    method = ret_msg['method']
++                    kwargs = ret_msg['args']
++                    context = ret_msg['context']
++                    func = ret_msg['func']
++                    if serializer is None:
++                        client = rpcclient.get_client(target)
++                    else:
++                        client = rpcclient.get_client(target, serializer=serializer)
++                    prep_args = ret_msg.get('prep_args')
++                    if prep_args is None:
++                        cctxt = client.prepare()
++                    else:
++                        cctxt = client.prepare(**prep_args)
++                        #temp = object()
++                        #cctxt = client.prepare(exchange=prep_args.get('exchange', temp), 
++                        #                        topic=prep_args.get('topic', temp), 
++                        #                        namespace=prep_args.get('namespace', temp), 
++                        #                        version=prep_args.get('version', temp), 
++                        #                        server=prep_args.get('server', temp), 
++                        #                        fanout=prep_args.get('fanout', temp), 
++                        #                        timeout=prep_args.get('timeout', temp), 
++                        #                        version_cap=prep_args.get('version_cap', temp), 
++                        #                        retry=prep_args.get('retry', temp))
++                    try:
++                        if func == 'cast':
++                            cctxt.cast(context, method, **kwargs)
++                            parent_w_pipe.send({'exception': False})
++                        elif func == 'call':
++                            res = cctxt.call(context, method, **kwargs)
++                            print '***************return %s call result to child: %s'%(method, res)
++                            parent_w_pipe.send({'exception': False, 'response': res})
++                        else:
++                            print '*************SYQ: unsupported method'
++                    except Exception as ex:
++                        print '*********************SYQ: exception %s'%type(ex)
++                        if hasattr(ex, 'serialize'):
++                            parent_w_pipe.send({'exception': True, 'ex': ex.serialize()})
++                        else:
++                            parent_w_pipe.send({'exception': True, 'ex': {'ex_name': type(ex).__name__}})
++                else:
++                    print 'http request'
++            greenthread.sleep(0)
++        p.join()
++        
+ 
+     @contextlib.contextmanager
+     def __call__(self, incoming, executor_callback=None):
++        # SYQ: oslo_messaging._drivers.amqpdriver.AMQPIncomingMessage
+         incoming.acknowledge()
+         yield lambda: self._dispatch_and_reply(incoming, executor_callback)
+ 
+     def _dispatch_and_reply(self, incoming, executor_callback):
+         try:
+-            incoming.reply(self._dispatch(incoming.ctxt,
++            result = self._dispatch(incoming.ctxt,
+                                           incoming.message,
+-                                          executor_callback))
++                                          executor_callback)
++            incoming.reply(result)
+         except ExpectedException as e:
+             LOG.debug(u'Expected exception during message handling (%s)',
+                       e.exc_info[1])
+@@ -169,6 +362,9 @@
+         namespace = message.get('namespace')
+         version = message.get('version', '1.0')
+ 
++        # SYQ
++        print '***********SYQ: method is %s'%method
++
+         found_compatible = False
+         for endpoint in self.endpoints:
+             target = getattr(endpoint, 'target', None)
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/rpcclient.py oslo_messaging/rpcclient.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/rpcclient.py	1969-12-31 19:00:00.000000000 -0500
++++ oslo_messaging/rpcclient.py	2016-04-10 19:32:36.086012622 -0400
+@@ -0,0 +1,152 @@
++# Copyright 2013 Red Hat, Inc.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++# Moved from nova/rpc.py to oslo_messaging/rpc.py
++
++__all__ = [
++    'init',
++    'cleanup',
++    'set_defaults',
++    'add_extra_exmods',
++    'clear_extra_exmods',
++    'get_allowed_exmods',
++    'RequestContextSerializer',
++    'get_client',
++    'get_server',
++    'get_notifier',
++    'TRANSPORT_ALIASES',
++]
++
++from oslo_config import cfg
++# SYQ
++from oslo_messaging import serializer 
++import oslo_messaging as messaging
++from oslo_serialization import jsonutils
++from oslo_messaging import globalvariable as globalv
++
++import nova.context
++import nova.exception
++
++CONF = cfg.CONF
++TRANSPORT = None
++NOTIFIER = None
++
++ALLOWED_EXMODS = [
++    nova.exception.__name__,
++]
++EXTRA_EXMODS = []
++
++# NOTE(markmc): The nova.openstack.common.rpc entries are for backwards compat
++# with Havana rpc_backend configuration values. The nova.rpc entries are for
++# compat with Essex values.
++TRANSPORT_ALIASES = {
++    'nova.openstack.common.rpc.impl_kombu': 'rabbit',
++    'nova.openstack.common.rpc.impl_qpid': 'qpid',
++    'nova.openstack.common.rpc.impl_zmq': 'zmq',
++    'nova.rpc.impl_kombu': 'rabbit',
++    'nova.rpc.impl_qpid': 'qpid',
++    'nova.rpc.impl_zmq': 'zmq',
++}
++
++
++def init(conf):
++    global TRANSPORT, NOTIFIER
++    exmods = get_allowed_exmods()
++    TRANSPORT = messaging.get_transport(conf,
++                                        allowed_remote_exmods=exmods,
++                                        aliases=TRANSPORT_ALIASES)
++    serializer = RequestContextSerializer(JsonPayloadSerializer())
++    NOTIFIER = messaging.Notifier(TRANSPORT, serializer=serializer)
++
++
++def cleanup():
++    global TRANSPORT, NOTIFIER
++    assert TRANSPORT is not None
++    assert NOTIFIER is not None
++    TRANSPORT.cleanup()
++    TRANSPORT = NOTIFIER = None
++
++
++def set_defaults(control_exchange):
++    messaging.set_transport_defaults(control_exchange)
++
++
++def add_extra_exmods(*args):
++    EXTRA_EXMODS.extend(args)
++
++
++def clear_extra_exmods():
++    del EXTRA_EXMODS[:]
++
++
++def get_allowed_exmods():
++    return ALLOWED_EXMODS + EXTRA_EXMODS
++
++
++class JsonPayloadSerializer(serializer.NoOpSerializer):
++    @staticmethod
++    def serialize_entity(context, entity):
++        return jsonutils.to_primitive(entity, convert_instances=True)
++
++
++class RequestContextSerializer(serializer.Serializer):
++
++    def __init__(self, base):
++        self._base = base
++
++    def serialize_entity(self, context, entity):
++        if not self._base:
++            return entity
++        return self._base.serialize_entity(context, entity)
++
++    def deserialize_entity(self, context, entity):
++        if not self._base:
++            return entity
++        return self._base.deserialize_entity(context, entity)
++
++    def serialize_context(self, context):
++        return context.to_dict()
++
++    def deserialize_context(self, context):
++        return nova.context.RequestContext.from_dict(context)
++
++
++def get_transport_url(url_str=None):
++    return messaging.TransportURL.parse(CONF, url_str, TRANSPORT_ALIASES)
++
++
++def get_client(target, version_cap=None, serializer=None):
++    # SYQ
++    serializer = RequestContextSerializer(serializer)
++    return messaging.RPCClient(globalv.transport,
++                               target,
++                               version_cap=version_cap,
++                               serializer=serializer)
++
++
++def get_server(target, endpoints, serializer=None):
++    assert TRANSPORT is not None
++    serializer = RequestContextSerializer(serializer)
++    return messaging.get_rpc_server(TRANSPORT,
++                                    target,
++                                    endpoints,
++                                    executor='eventlet',
++                                    serializer=serializer)
++
++
++def get_notifier(service, host=None, publisher_id=None):
++    assert NOTIFIER is not None
++    if not publisher_id:
++        publisher_id = "%s.%s" % (service, host or CONF.host)
++    return NOTIFIER.prepare(publisher_id=publisher_id)
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/tests/drivers/test_impl_rabbit.py oslo_messaging/tests/drivers/test_impl_rabbit.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/tests/drivers/test_impl_rabbit.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/tests/drivers/test_impl_rabbit.py	2016-04-10 19:32:36.210015377 -0400
+@@ -208,6 +208,22 @@
+                 conn.connection.reset()
+                 self.assertEqual(channel, conn.connection.channel)
+ 
++    def test_connection_ack_have_disconnected_kombu_connection(self):
++        transport = oslo_messaging.get_transport(self.conf,
++                                                 'kombu+memory:////')
++        self.addCleanup(transport.cleanup)
++        with transport._driver._get_connection(amqp.PURPOSE_LISTEN) as conn:
++            conn.connection.connection.recoverable_channel_errors = (IOError,)
++            with mock.patch('kombu.connection.Connection.connected',
++                            new_callable=mock.PropertyMock,
++                            return_value=False):
++                channel = conn.channel
++                conn.connection.connected = False
++                self.assertRaises(driver_common.Timeout,
++                                  conn.consume, timeout=0.01)
++                # Ensure a new channel have been setuped
++                self.assertNotEqual(channel, conn.channel)
++
+ 
+ class TestRabbitTransportURL(test_utils.BaseTestCase):
+ 
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/tests/drivers/test_impl_zmq.py oslo_messaging/tests/drivers/test_impl_zmq.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/tests/drivers/test_impl_zmq.py	2015-06-09 11:09:38.000000000 -0400
++++ oslo_messaging/tests/drivers/test_impl_zmq.py	2016-04-10 19:32:36.210015377 -0400
+@@ -150,10 +150,11 @@
+ 
+         self.assertEqual(result, True)
+         mock_call.assert_called_once_with(
++            self.driver,
+             'tcp://127.0.0.1:%s' % self.conf['rpc_zmq_port'],
+             {}, 'fanout~testtopic.127.0.0.1',
+             {'tx_id': 1, 'method': 'hello-world'},
+-            None, False, [])
++            None, False, [], True)
+ 
+     @mock.patch('oslo_messaging._drivers.impl_zmq._call', autospec=True)
+     def test_send_receive_direct(self, mock_call):
+@@ -171,10 +172,11 @@
+ 
+         self.assertEqual(result, True)
+         mock_call.assert_called_once_with(
++            self.driver,
+             'tcp://localhost:%s' % self.conf['rpc_zmq_port'],
+             {}, 'testtopic.localhost',
+             {'tx_id': 1, 'method': 'hello-world'},
+-            None, False, [])
++            None, False, [], True)
+ 
+ 
+ class TestZmqSocket(test_utils.BaseTestCase):
+@@ -291,7 +293,7 @@
+     def test_zmqconnection_create_consumer(self, mock_reactor):
+ 
+         mock_reactor.register = mock.Mock()
+-        conn = impl_zmq.Connection(self.driver)
++        conn = impl_zmq.Connection(self.driver.conf, self.driver)
+         topic = 'topic.foo'
+         context = mock.Mock()
+         inaddr = ('ipc://%s/zmq_topic_topic.127.0.0.1' %
+@@ -317,7 +319,7 @@
+     @mock.patch('oslo_messaging._drivers.impl_zmq.ZmqReactor', autospec=True)
+     def test_zmqconnection_create_consumer_topic_exists(self, mock_reactor):
+         mock_reactor.register = mock.Mock()
+-        conn = impl_zmq.Connection(self.driver)
++        conn = impl_zmq.Connection(self.driver.conf, self.driver)
+         topic = 'topic.foo'
+         context = mock.Mock()
+         inaddr = ('ipc://%s/zmq_topic_topic.127.0.0.1' %
+@@ -335,7 +337,7 @@
+                 autospec=True)
+     @mock.patch('oslo_messaging._drivers.impl_zmq.ZmqReactor', autospec=True)
+     def test_zmqconnection_close(self, mock_reactor, mock_getmatchmaker):
+-        conn = impl_zmq.Connection(self.driver)
++        conn = impl_zmq.Connection(self.driver.conf, self.driver)
+         conn.reactor.close = mock.Mock()
+         mock_getmatchmaker.return_value.stop_heartbeat = mock.Mock()
+         conn.close()
+@@ -344,7 +346,7 @@
+ 
+     @mock.patch('oslo_messaging._drivers.impl_zmq.ZmqReactor', autospec=True)
+     def test_zmqconnection_wait(self, mock_reactor):
+-        conn = impl_zmq.Connection(self.driver)
++        conn = impl_zmq.Connection(self.driver, self.driver)
+         conn.reactor.wait = mock.Mock()
+         conn.wait()
+         self.assertTrue(conn.reactor.wait.called)
+@@ -355,7 +357,7 @@
+     def test_zmqconnection_consume_in_thread(self, mock_reactor,
+                                              mock_getmatchmaker):
+         mock_getmatchmaker.return_value.start_heartbeat = mock.Mock()
+-        conn = impl_zmq.Connection(self.driver)
++        conn = impl_zmq.Connection(self.driver, self.driver)
+         conn.reactor.consume_in_thread = mock.Mock()
+         conn.consume_in_thread()
+         self.assertTrue(mock_getmatchmaker.return_value.start_heartbeat.called)
+@@ -425,9 +427,10 @@
+         msg = 'jeronimo'
+         self.driver.send(oslo_messaging.Target(topic=topic), context, msg,
+                          False, 0, False)
+-        mock_multi_send.assert_called_with(mock_cast, context, topic, msg,
++        mock_multi_send.assert_called_with(self.driver, mock_cast, context,
++                                           topic, msg,
+                                            allowed_remote_exmods=[],
+-                                           envelope=False)
++                                           envelope=False, pooled=True)
+ 
+     @mock.patch('oslo_messaging._drivers.impl_zmq._cast', autospec=True)
+     @mock.patch('oslo_messaging._drivers.impl_zmq._multi_send', autospec=True)
+@@ -438,9 +441,10 @@
+         msg = 'jeronimo'
+         self.driver.send_notification(oslo_messaging.Target(topic=topic),
+                                       context, msg, False, False)
+-        mock_multi_send.assert_called_with(mock_cast, context, topic_reformat,
+-                                           msg, allowed_remote_exmods=[],
+-                                           envelope=False)
++        mock_multi_send.assert_called_with(self.driver, mock_cast, context,
++                                           topic_reformat, msg,
++                                           allowed_remote_exmods=[],
++                                           envelope=False, pooled=True)
+ 
+     @mock.patch('oslo_messaging._drivers.impl_zmq.ZmqListener', autospec=True)
+     @mock.patch('oslo_messaging._drivers.impl_zmq.Connection', autospec=True)
+diff -uNr -x '*.pyc' original/oslo.messaging-1.8.3/oslo_messaging/transport.py oslo_messaging/transport.py
+--- original/oslo.messaging-1.8.3/oslo_messaging/transport.py	2015-06-09 11:09:36.000000000 -0400
++++ oslo_messaging/transport.py	2016-04-10 19:32:36.118013333 -0400
+@@ -115,6 +115,10 @@
+     def cleanup(self):
+         """Release all resources associated with this transport."""
+         self._driver.cleanup()
++    
++    # SYQ
++    def cleanup_child(self):
++        self._driver.cleanup_child()
+ 
+ 
+ class InvalidTransportURL(exceptions.MessagingException):

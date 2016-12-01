@@ -1,0 +1,6 @@
+config SECURITY_DIFC
+	bool "difc support"
+	depends on SECURITY
+	default n
+	help
+		This selects DIFC

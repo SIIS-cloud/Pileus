@@ -1,0 +1,116 @@
+diff -uNr -x '*.pyc' original/keystonemiddleware-1.5.0/keystonemiddleware/auth_token/__init__.py keystonemiddleware/auth_token/__init__.py
+--- original/keystonemiddleware-1.5.0/keystonemiddleware/auth_token/__init__.py	2015-03-11 13:41:14.000000000 -0400
++++ keystonemiddleware/auth_token/__init__.py	2016-04-10 19:31:56.981143868 -0400
+@@ -179,6 +179,13 @@
+ import datetime
+ import logging
+ 
++# SYQ
++import os
++import sys
++import ast
++from multiprocessing import Process, Queue, Pipe
++from eventlet import greenthread
++
+ from keystoneclient import access
+ from keystoneclient import adapter
+ from keystoneclient import auth
+@@ -632,6 +639,37 @@
+         self._LOG.debug("Received request from %s", _fmt_msg(env))
+ 
+         return self._call_app(env, start_response)
++        """
++        # SYQ: spawn with new label
++        def spawn_with_label(env, start_response, child_pipe, parent_pipe):
++            # Some HTTP requests do not have nova.context
++            # MAYBE WRONG: handling these requests do not require outgoing
++            # messages
++            if env.has_key('nova.context'):
++                novacontext = env['nova.context']
++                novacontext.set_pipe(child_pipe, parent_pipe)
++                print '***************SYQ: id %s'%id(novacontext)
++            response = self._call_app(env, start_response)
++            msg = {'type': 'END', 'captured': env['captured'], 'response': response}
++            child_pipe.send(msg)
++            child_pipe.close()
++        
++        parent_pipe, child_pipe = Pipe()
++        p = Process(target=spawn_with_label, args=(env, start_response, child_pipe, parent_pipe, ))
++        p.start()
++        while True:
++            if parent_pipe.poll():
++                msg = parent_pipe.recv()
++                if msg['type'] == 'END':
++                    env['captured'][:] = msg['captured']
++                    response = msg['response']
++                    return response
++                else:
++                    # new message or http request out
++                     print '***********SYQ*********: message from spawned process is %s'%msg
++            greenthread.sleep(0)
++        p.join()
++        """
+ 
+     def _do_503_error(self, env, start_response):
+         resp = _utils.MiniResp('Service unavailable', env)
+diff -uNr -x '*.pyc' original/keystonemiddleware-1.5.0/keystonemiddleware/s3_token.py keystonemiddleware/s3_token.py
+--- original/keystonemiddleware-1.5.0/keystonemiddleware/s3_token.py	2015-03-11 13:41:14.000000000 -0400
++++ keystonemiddleware/s3_token.py	2016-04-10 19:31:56.981143868 -0400
+@@ -35,6 +35,7 @@
+ import webob
+ 
+ from oslo_serialization import jsonutils
++from oslo_utils import strutils
+ import requests
+ import six
+ from six.moves import urllib
+@@ -116,7 +117,7 @@
+                                             auth_port)
+ 
+         # SSL
+-        insecure = conf.get('insecure', False)
++        insecure = strutils.bool_from_string(conf.get('insecure', False))
+         cert_file = conf.get('certfile')
+         key_file = conf.get('keyfile')
+ 
+diff -uNr -x '*.pyc' original/keystonemiddleware-1.5.0/keystonemiddleware/tests/test_s3_token_middleware.py keystonemiddleware/tests/test_s3_token_middleware.py
+--- original/keystonemiddleware-1.5.0/keystonemiddleware/tests/test_s3_token_middleware.py	2015-03-11 13:41:14.000000000 -0400
++++ keystonemiddleware/tests/test_s3_token_middleware.py	2016-04-10 19:31:57.005144401 -0400
+@@ -124,7 +124,7 @@
+     @mock.patch.object(requests, 'post')
+     def test_insecure(self, MOCK_REQUEST):
+         self.middleware = (
+-            s3_token.filter_factory({'insecure': True})(FakeApp()))
++            s3_token.filter_factory({'insecure': 'True'})(FakeApp()))
+ 
+         text_return_value = jsonutils.dumps(GOOD_RESPONSE)
+         if six.PY3:
+@@ -142,6 +142,28 @@
+         mock_args, mock_kwargs = MOCK_REQUEST.call_args
+         self.assertIs(mock_kwargs['verify'], False)
+ 
++    def test_insecure_option(self):
++        # insecure is passed as a string.
++
++        # Some non-secure values.
++        true_values = ['true', 'True', '1', 'yes']
++        for val in true_values:
++            config = {'insecure': val, 'certfile': 'false_ind'}
++            middleware = s3_token.filter_factory(config)(FakeApp())
++            self.assertIs(False, middleware._verify)
++
++        # Some "secure" values, including unexpected value.
++        false_values = ['false', 'False', '0', 'no', 'someweirdvalue']
++        for val in false_values:
++            config = {'insecure': val, 'certfile': 'false_ind'}
++            middleware = s3_token.filter_factory(config)(FakeApp())
++            self.assertEqual('false_ind', middleware._verify)
++
++        # Default is secure.
++        config = {'certfile': 'false_ind'}
++        middleware = s3_token.filter_factory(config)(FakeApp())
++        self.assertIs('false_ind', middleware._verify)
++
+ 
+ class S3TokenMiddlewareTestBad(S3TokenMiddlewareTestBase):
+     def setUp(self):

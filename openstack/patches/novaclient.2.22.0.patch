@@ -1,0 +1,167 @@
+diff -uNr -x '*.pyc' original/python-novaclient-2.22.0/novaclient/base.py novaclient/base.py
+--- original/python-novaclient-2.22.0/novaclient/base.py	2015-03-02 09:39:25.000000000 -0500
++++ novaclient/base.py	2016-04-10 19:33:38.119390712 -0400
+@@ -58,6 +58,7 @@
+         self.api = api
+ 
+     def _list(self, url, response_key, obj_class=None, body=None):
++        # novaclient.client.SessionClient
+         if body:
+             _resp, body = self.api.client.post(url, body=body)
+         else:
+diff -uNr -x '*.pyc' original/python-novaclient-2.22.0/novaclient/client.py novaclient/client.py
+--- original/python-novaclient-2.22.0/novaclient/client.py	2015-03-02 09:39:25.000000000 -0500
++++ novaclient/client.py	2016-04-10 19:33:37.959387158 -0400
+@@ -83,11 +83,13 @@
+         # keystoneclient, where we need to raise the novaclient errors.
+         raise_exc = kwargs.pop('raise_exc', True)
+         start_time = time.time()
++ 
+         resp, body = super(SessionClient, self).request(url,
+                                                         method,
+                                                         raise_exc=False,
+                                                         **kwargs)
+ 
++
+         end_time = time.time()
+         self.times.append(('%s %s' % (method, url),
+                           start_time, end_time))
+@@ -137,7 +139,8 @@
+                  http_log_debug=False, auth_system='keystone',
+                  auth_plugin=None, auth_token=None,
+                  cacert=None, tenant_id=None, user_id=None,
+-                 connection_pool=False):
++                 # SYQ
++                 connection_pool=False, label=None):
+         self.user = user
+         self.user_id = user_id
+         self.password = password
+@@ -185,6 +188,9 @@
+         self.keyring_saver = None
+         self.keyring_saved = False
+ 
++        # SYQ
++        self.label = label
++
+         if insecure:
+             self.verify_cert = False
+         else:
+@@ -362,6 +368,7 @@
+             url,
+             **kwargs)
+ 
++
+         self.http_log_resp(resp)
+ 
+         if resp.text:
+@@ -661,7 +668,7 @@
+                            auth_token=None, cacert=None, tenant_id=None,
+                            user_id=None, connection_pool=False, session=None,
+                            auth=None, user_agent='python-novaclient',
+-                           interface=None, **kwargs):
++                           interface=None, label=None, **kwargs):
+     if session:
+         return SessionClient(session=session,
+                              auth=auth,
+@@ -669,7 +676,7 @@
+                              service_type=service_type,
+                              region_name=region_name,
+                              service_name=service_name,
+-                             user_agent=user_agent,
++                             user_agent=user_agent, label=label, 
+                              **kwargs)
+     else:
+         # FIXME(jamielennox): username and password are now optional. Need
+@@ -697,7 +704,7 @@
+                           os_cache=os_cache,
+                           http_log_debug=http_log_debug,
+                           cacert=cacert,
+-                          connection_pool=connection_pool)
++                          connection_pool=connection_pool, label=label)
+ 
+ 
+ def get_client_class(version):
+diff -uNr -x '*.pyc' original/python-novaclient-2.22.0/novaclient/openstack/common/apiclient/client.py novaclient/openstack/common/apiclient/client.py
+--- original/python-novaclient-2.22.0/novaclient/openstack/common/apiclient/client.py	2015-03-02 09:39:25.000000000 -0500
++++ novaclient/openstack/common/apiclient/client.py	2016-04-10 19:33:38.123390801 -0400
+@@ -156,6 +156,7 @@
+              requests.Session.request (such as `headers`) or `json`
+              that will be encoded as JSON and used as `data` argument
+         """
++        print "*****************************\n"
+         kwargs.setdefault("headers", {})
+         kwargs["headers"]["User-Agent"] = self.user_agent
+         if self.original_ip:
+@@ -210,7 +211,6 @@
+         :param kwargs: any other parameter that can be passed to
+             `HTTPClient.request`
+         """
+-
+         filter_args = {
+             "endpoint_type": client.endpoint_type or self.endpoint_type,
+             "service_type": client.service_type,
+diff -uNr -x '*.pyc' original/python-novaclient-2.22.0/novaclient/shell.py novaclient/shell.py
+--- original/python-novaclient-2.22.0/novaclient/shell.py	2015-03-02 09:39:25.000000000 -0500
++++ novaclient/shell.py	2016-04-10 19:33:37.959387158 -0400
+@@ -316,6 +316,12 @@
+             default=cliutils.env('OS_AUTH_TOKEN'),
+             help='Defaults to env[OS_AUTH_TOKEN]')
+ 
++        # SYQ: enable user to specify labels
++        parser. add_argument(
++            '--label',
++            default='|',
++            help='Defaults to empty(|)')
++
+         parser.add_argument(
+             '--os_username',
+             help=argparse.SUPPRESS)
+@@ -634,6 +640,9 @@
+         keystone_session = None
+         keystone_auth = None
+ 
++        # SYQ
++        label = args.label
++
+         # We may have either, both or none of these.
+         # If we have both, we don't need USERNAME, PASSWORD etc.
+         # Fill in the blanks from the SecretsHelper if possible.
+@@ -766,7 +775,8 @@
+             timings=args.timings, bypass_url=bypass_url,
+             os_cache=os_cache, http_log_debug=options.debug,
+             cacert=cacert, timeout=timeout,
+-            session=keystone_session, auth=keystone_auth)
++            # SYQ: transfer label
++            session=keystone_session, auth=keystone_auth, label=label)
+ 
+         # Now check for the password/token of which pieces of the
+         # identifying keyring key can come from the underlying client
+@@ -833,6 +843,7 @@
+                 timings=args.timings, bypass_url=bypass_url,
+                 os_cache=os_cache, http_log_debug=options.debug,
+                 session=keystone_session, auth=keystone_auth,
++                # SYQ: may be we need to add label here too
+                 cacert=cacert, timeout=timeout)
+ 
+         args.func(self.cs, args)
+diff -uNr -x '*.pyc' original/python-novaclient-2.22.0/novaclient/v2/client.py novaclient/v2/client.py
+--- original/python-novaclient-2.22.0/novaclient/v2/client.py	2015-03-02 09:39:25.000000000 -0500
++++ novaclient/v2/client.py	2016-04-10 19:33:38.115390623 -0400
+@@ -103,6 +103,8 @@
+                  auth_system='keystone', auth_plugin=None, auth_token=None,
+                  cacert=None, tenant_id=None, user_id=None,
+                  connection_pool=False, session=None, auth=None,
++                 # SYQ
++                 label=None,
+                  **kwargs):
+         # FIXME(comstud): Rename the api_key argument above when we
+         # know it's not being used as keyword argument
+@@ -194,6 +196,8 @@
+             connection_pool=connection_pool,
+             session=session,
+             auth=auth,
++            # SYQ
++            label=label,
+             **kwargs)
+ 
+     @client._original_only

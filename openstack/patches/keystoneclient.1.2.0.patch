@@ -1,0 +1,134 @@
+diff -uNr -x '*.pyc' original/python-keystoneclient-1.2.0/keystoneclient/adapter.py keystoneclient/adapter.py
+--- original/python-keystoneclient-1.2.0/keystoneclient/adapter.py	2015-02-26 17:58:45.000000000 -0500
++++ keystoneclient/adapter.py	2016-04-10 19:32:09.037411712 -0400
+@@ -45,7 +45,7 @@
+     @utils.positional()
+     def __init__(self, session, service_type=None, service_name=None,
+                  interface=None, region_name=None, endpoint_override=None,
+-                 version=None, auth=None, user_agent=None,
++                 version=None, auth=None, user_agent=None, label=None,
+                  connect_retries=None):
+         # NOTE(jamielennox): when adding new parameters to adapter please also
+         # add them to the adapter call in httpclient.HTTPClient.__init__
+@@ -59,6 +59,8 @@
+         self.user_agent = user_agent
+         self.auth = auth
+         self.connect_retries = connect_retries
++        # SYQ
++        self.label = label
+ 
+     def _set_endpoint_filter_kwargs(self, kwargs):
+         if self.service_type:
+@@ -86,6 +88,10 @@
+         if self.connect_retries is not None:
+             kwargs.setdefault('connect_retries', self.connect_retries)
+ 
++        # SYQ
++        if self.label:
++            kwargs.setdefault('label', self.label)
++
+         return self.session.request(url, method, **kwargs)
+ 
+     def get_token(self, auth=None):
+diff -uNr -x '*.pyc' original/python-keystoneclient-1.2.0/keystoneclient/middleware/s3_token.py keystoneclient/middleware/s3_token.py
+--- original/python-keystoneclient-1.2.0/keystoneclient/middleware/s3_token.py	2015-02-26 17:58:45.000000000 -0500
++++ keystoneclient/middleware/s3_token.py	2016-04-10 19:32:09.017411268 -0400
+@@ -34,6 +34,7 @@
+ import logging
+ 
+ from oslo_serialization import jsonutils
++from oslo_utils import strutils
+ import requests
+ import six
+ from six.moves import urllib
+@@ -116,7 +117,7 @@
+         self.request_uri = '%s://%s:%s' % (auth_protocol, auth_host, auth_port)
+ 
+         # SSL
+-        insecure = conf.get('insecure', False)
++        insecure = strutils.bool_from_string(conf.get('insecure', False))
+         cert_file = conf.get('certfile')
+         key_file = conf.get('keyfile')
+ 
+diff -uNr -x '*.pyc' original/python-keystoneclient-1.2.0/keystoneclient/session.py keystoneclient/session.py
+--- original/python-keystoneclient-1.2.0/keystoneclient/session.py	2015-02-26 17:58:45.000000000 -0500
++++ keystoneclient/session.py	2016-04-10 19:32:09.037411712 -0400
+@@ -125,14 +125,15 @@
+ 
+     @utils.positional(2, enforcement=utils.positional.WARN)
+     def __init__(self, auth=None, session=None, original_ip=None, verify=True,
+-                 cert=None, timeout=None, user_agent=None,
++                 cert=None, timeout=None, user_agent=None, label=None,
+                  redirect=_DEFAULT_REDIRECT_LIMIT):
+         if not session:
+             session = requests.Session()
+             # Use TCPKeepAliveAdapter to fix bug 1323862
+             for scheme in session.adapters.keys():
+                 session.mount(scheme, TCPKeepAliveAdapter())
+-
++        # SYQ
++        self.label = label
+         self.auth = auth
+         self.session = session
+         self.original_ip = original_ip
+@@ -227,7 +228,7 @@
+                 user_agent=None, redirect=None, authenticated=None,
+                 endpoint_filter=None, auth=None, requests_auth=None,
+                 raise_exc=True, allow_reauth=True, log=True,
+-                endpoint_override=None, connect_retries=0, **kwargs):
++                endpoint_override=None, connect_retries=0, label=None, **kwargs):
+         """Send an HTTP request with the specified characteristics.
+ 
+         Wrapper around `requests.Session.request` to handle tasks such as
+@@ -345,6 +346,10 @@
+         else:
+             user_agent = headers.setdefault('User-Agent', USER_AGENT)
+ 
++        # SYQ
++        if label:
++            headers['Label'] = label 
++
+         if self.original_ip:
+             headers.setdefault('Forwarded',
+                                'for=%s;by=%s' % (self.original_ip, user_agent))
+diff -uNr -x '*.pyc' original/python-keystoneclient-1.2.0/keystoneclient/tests/unit/test_s3_token_middleware.py keystoneclient/tests/unit/test_s3_token_middleware.py
+--- original/python-keystoneclient-1.2.0/keystoneclient/tests/unit/test_s3_token_middleware.py	2015-02-26 17:58:45.000000000 -0500
++++ keystoneclient/tests/unit/test_s3_token_middleware.py	2016-04-10 19:32:09.093412956 -0400
+@@ -122,7 +122,7 @@
+     @mock.patch.object(requests, 'post')
+     def test_insecure(self, MOCK_REQUEST):
+         self.middleware = (
+-            s3_token.filter_factory({'insecure': True})(FakeApp()))
++            s3_token.filter_factory({'insecure': 'True'})(FakeApp()))
+ 
+         text_return_value = jsonutils.dumps(GOOD_RESPONSE)
+         if six.PY3:
+@@ -140,6 +140,28 @@
+         mock_args, mock_kwargs = MOCK_REQUEST.call_args
+         self.assertIs(mock_kwargs['verify'], False)
+ 
++    def test_insecure_option(self):
++        # insecure is passed as a string.
++
++        # Some non-secure values.
++        true_values = ['true', 'True', '1', 'yes']
++        for val in true_values:
++            config = {'insecure': val, 'certfile': 'false_ind'}
++            middleware = s3_token.filter_factory(config)(FakeApp())
++            self.assertIs(False, middleware.verify)
++
++        # Some "secure" values, including unexpected value.
++        false_values = ['false', 'False', '0', 'no', 'someweirdvalue']
++        for val in false_values:
++            config = {'insecure': val, 'certfile': 'false_ind'}
++            middleware = s3_token.filter_factory(config)(FakeApp())
++            self.assertEqual('false_ind', middleware.verify)
++
++        # Default is secure.
++        config = {'certfile': 'false_ind'}
++        middleware = s3_token.filter_factory(config)(FakeApp())
++        self.assertIs('false_ind', middleware.verify)
++
+ 
+ class S3TokenMiddlewareTestBad(S3TokenMiddlewareTestBase):
+     def setUp(self):
