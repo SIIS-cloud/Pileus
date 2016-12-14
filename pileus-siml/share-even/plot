@@ -1,0 +1,5 @@
+set xrange [0:2000];
+set yrange [0:11];
+set ylabel "Average TCB sharing factor";
+set xlabel "Number of cloud operations performed";
+plot "result.txt" using 1:2 with linespoints title "Maximum utilization", "result.txt" using 1:3 with linespoints title "Random pick", "result.txt" using 1:4 with linespoints title "Minimum usage", "result.txt" using 1:5 with linespoints title "Least TCB sharing";

@@ -1,0 +1,5 @@
+set xrange [0:2000]
+set yrange [0:11]
+set ylabel "Average TCB sharing factor"
+set xlabel "Number of cloud operations performed"
+plot "result_balance_5.txt" using 1:2 with linespoints title "5 nodes per group", "result_balance_100.txt" using 1:2 with linespoints title "100 nodes per group", "result_balance_250.txt" using 1:2 with linespoints title "250 nodes per group", "result_balance_500.txt" using 1:2 with linespoints title "500 nodes per group", "result_balance_1000.txt" using 1:2 with linespoints title "1000 nodes per group";

@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+from multiprocessing import Process, Value
+import time
+import sys
+import xmlrpc.client
+
+def call_rpc(errors, i):
+    try:
+        s = xmlrpc.client.ServerProxy('https://localhost:8000')
+        s.test(i)
+    except Exception as Ex:
+        errors.value += 1
+
+def jobs_process(errors, process_n):
+    for i in range(process_n):
+        p = Process(target=call_rpc, args=(errors, i))
+        p.start()
+
+if __name__ == '__main__':
+    process_n = sys.argv[1]
+    errors = Value('i', 0)
+    intprocess = int(process_n)
+    start = time.time()
+    jobs = Process(target=jobs_process, args=(errors, intprocess))
+    jobs.start()
+    jobs.join()
+    took = time.time() - start
+    print("Total jobs: %s" % (process_n))
+    print("RPC Errors: %s" % (errors.value))
+    print("Elapsed time: %s" % (took))
+    sys.exit(0)
+
+        
+        

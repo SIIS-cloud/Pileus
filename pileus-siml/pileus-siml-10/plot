@@ -1,0 +1,7 @@
+set terminal pdf
+set output 'revocation.pdf'
+set xlabel 'Number of cloud operations';
+set ylabel 'Expected number of cloud nodes in TCB';
+set yrange [0:1100];
+set xrange [0:2000];
+plot "limit.txt" lt -1 title "original OpenStack", "pollution.txt" every 50 with linespoints lt 1 title "w/o revocation", "expiration.txt" every 50 with linespoints lt 2 title "revocation by expiration (DStar)", "revocation.txt" every 50 with linespoints lt 3 title "timely revocation (Pileus)", "algorithm.txt" every 50 with linespoints lt 4 title "timely revocation with spawn scheduling (Pileus)";
